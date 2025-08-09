@@ -1,8 +1,7 @@
 #include "region.h"
-#include <string.h>
 
 void init_region(Region* region) {
-    memset(region, 0, sizeof(Region));
+    region->is_obstacle = false;
     region->temperature = 1.0f;  // Default temperature (neutral)
     region->energy_level = 1.0f; // Default energy level (neutral)
     region->randomness_factor = 0.0f; // No randomness by default

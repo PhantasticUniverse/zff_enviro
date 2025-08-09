@@ -157,10 +157,20 @@ input, select, button {
                 </div>
                 <div>
                     <button id="toggleGlobalEffects">Toggle Global Effects</button>
+                    <label style="margin-left:10px;">
+                        <input type="checkbox" id="toggleRegionOverlay" checked>
+                        Region overlay
+                    </label>
                 </div>
             </div>
             <div class="right-controls" id="regionControls">
                 <h3>Region Controls</h3>
+                <div>
+                    <label>
+                        <input type="checkbox" id="brushMode">
+                        Brush mode
+                    </label>
+                </div>
                 <div>
                     <label for="temperatureSlider">Temperature:</label>
                     <input type="range" id="temperatureSlider" min="0" max="2" step="0.1" value="1">
@@ -177,6 +187,23 @@ input, select, button {
                     <span id="randomnessValue">0.0</span>
                 </div>
                 <div>
+                    <label>Brush:</label>
+                    <select id="brushParam">
+                        <option value="temperature">Temperature</option>
+                        <option value="energy">Energy</option>
+                        <option value="randomness">Randomness</option>
+                        <option value="obstacle">Obstacle</option>
+                        <option value="dirN">Dir ↑</option>
+                        <option value="dirE">Dir →</option>
+                        <option value="dirS">Dir ↓</option>
+                        <option value="dirW">Dir ←</option>
+                    </select>
+                    <label for="brushValue">Value:</label>
+                    <input type="number" id="brushValue" value="1" step="0.1" style="width:72px;">
+                    <label for="brushSize">Size:</label>
+                    <input type="number" id="brushSize" value="1" min="1" max="16" step="1" style="width:60px;">
+                </div>
+                <div>
                     <label>Directional Influence:</label>
                     <button id="northBtn">↑</button>
                     <button id="eastBtn">→</button>
@@ -184,7 +211,10 @@ input, select, button {
                     <button id="westBtn">←</button>
                 </div>
                 <div>
-                    <button id="obstacleBtn">Toggle Obstacle</button>
+                    <label>
+                        <input type="checkbox" id="obstacleMode" checked>
+                        Obstacle toggle (click to toggle tiles)
+                    </label>
                 </div>
             </div>
         </div>

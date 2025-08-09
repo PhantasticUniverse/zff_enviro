@@ -1,9 +1,9 @@
 #include "common.h"
-#include "math.h"
+#include <stdbool.h>
 #include "region.h"
 #include "region_grid.h"
 #include <stddef.h> // This defines NULL
-#include <stdbool.h>
+#include "stdio.h" // local shim for any external deps
 
 enum {
     SOUP_WIDTH = 200,
@@ -28,6 +28,9 @@ BUFFER(batch_idx, int, MAX_BATCH_PAIR_N*2)
 BUFFER(batch, uint8_t, MAX_BATCH_PAIR_N*2*TAPE_LENGTH)
 BUFFER(batch_write_count, int, MAX_BATCH_PAIR_N*2)
 BUFFER(rng_state, uint64_t, 1)
+
+// Region grid plane for bulk JS sync: [obstacle, dirN, dirE, dirS, dirW, randomness, temperature, energy]
+BUFFER(region_grid_plane, float, MAX_REGION_GRID_SIZE*MAX_REGION_GRID_SIZE*8)
 
 static bool use_global_effects = true;
 
@@ -56,8 +59,12 @@ void init(int seed) {
     for (int i=0; i<TAPE_N*TAPE_LENGTH; ++i) {
         soup[i] = rand64();
     }
-    // Initialize region_grid with the current size
-    init_region_grid(get_region_grid_size());
+    // Ensure region grid is initialized with a sane default if needed
+    int size = get_region_grid_size();
+    if (size < MIN_REGION_GRID_SIZE || size > MAX_REGION_GRID_SIZE) {
+        size = MIN_REGION_GRID_SIZE;
+    }
+    init_region_grid(size);
     
     // Initialize cell_to_region_map
     update_mapping();
@@ -123,21 +130,14 @@ void mutate(int n) {
     }
 }
 
-// Add this function near the top of the file, after the includes
-static float custom_powf(float base, float exponent) {
-    float result = 1.0f;
-    for (int i = 0; i < (int)exponent; i++) {
-        result *= base;
-    }
-    return result;
-}
+// Removed custom_powf; we will use simple averaging for global effects to avoid libm dependencies.
 
 WASM_EXPORT("prepare_batch") int prepare_batch() {
     int pair_n = 0, collision_count=0, pos=0;
     uint8_t mask[TAPE_N] = {0};
-    float global_temperature = 1.0f;
-    float global_energy = 1.0f;
-    float global_randomness = 0.0f;
+    float sum_temperature = 0.0f;
+    float sum_energy = 0.0f;
+    float sum_randomness = 0.0f;
 
     while (pair_n<MAX_BATCH_PAIR_N && collision_count<16) {
         uint64_t rnd = rand64();
@@ -156,43 +156,29 @@ WASM_EXPORT("prepare_batch") int prepare_batch() {
         float dir_influence = horizontal ? 
             (region->directional_influence[EAST] - region->directional_influence[WEST]) :
             (region->directional_influence[SOUTH] - region->directional_influence[NORTH]);
-        if (dir_influence != 0.0f && rand64() % 1000 < fabsf(dir_influence) * 1000) {
+        // local fabs for freestanding builds
+        const float abs_dir_influence = dir_influence < 0.0f ? -dir_influence : dir_influence;
+        if (dir_influence != 0.0f && (rand64() % 1000) < (uint64_t)(abs_dir_influence * 1000.0f)) {
             dir = dir_influence > 0 ? 1 : -1;
         }
 
-        // Try to find a non-obstacle partner
-        bool found_partner = false;
-        for (int attempt = 0; attempt < 2; attempt++) {  // Try up to 2 times
-            if (horizontal) {
-                if (i % SOUP_WIDTH == 0)     { dir =  1; }
-                if ((i+1) % SOUP_WIDTH == 0) { dir = -1; }
-                j = i + dir;
-            } else {
-                if (i < SOUP_WIDTH)          { dir =  1; }
-                if (TAPE_N-i-1 < SOUP_WIDTH) { dir = -1; }
-                j = i + dir*SOUP_WIDTH;
-            }
-
-            // Ensure j is within bounds
-            if (j < 0 || j >= TAPE_N) {
-                dir = -dir;  // Reverse direction and try again
-                continue;
-            }
-
-            // Get the region for cell j
-            Region* region_j_ptr = get_cell_region(j % SOUP_WIDTH, j / SOUP_WIDTH);
-
-            // Check if the target cell is in an obstacle region
-            if (!region_j_ptr->is_obstacle && !mask[j]) {
-                found_partner = true;
-                break;
-            }
-
-            // If we didn't find a partner, change direction and try again
-            dir = -dir;
+        // Compute partner j (single attempt, original behavior)
+        if (horizontal) {
+            if (i % SOUP_WIDTH == 0)     { dir =  1; }
+            if ((i+1) % SOUP_WIDTH == 0) { dir = -1; }
+            j = i + dir;
+        } else {
+            if (i < SOUP_WIDTH)          { dir =  1; }
+            if (TAPE_N-i-1 < SOUP_WIDTH) { dir = -1; }
+            j = i + dir*SOUP_WIDTH;
         }
 
-        if (!found_partner) { ++collision_count; continue; }
+        // Bounds and mask check
+        if (j < 0 || j >= TAPE_N || mask[j]) { ++collision_count; continue; }
+
+        // Get the region for cell j and skip if obstacle (neutral by default)
+        Region* region_j_ptr = get_cell_region(j % SOUP_WIDTH, j / SOUP_WIDTH);
+        if (region_j_ptr->is_obstacle) { ++collision_count; continue; }
 
         mask[i] = mask[j] = 1;
         batch_idx[2*pair_n] = i;
@@ -205,27 +191,28 @@ WASM_EXPORT("prepare_batch") int prepare_batch() {
         pair_n++;
         collision_count = 0;
 
-        // Apply randomness factor if non-neutral
-        if (region->randomness_factor != 0.0f && rand64() % 1000 < region->randomness_factor * 1000) {
-            batch[pos-1] = rand64() & 0xFF;
-        }
+        // No random perturbation in default/original behavior
     }
 
     if (use_global_effects) {
-        global_temperature = 1.0f;
-        global_energy = 1.0f;
-        global_randomness = 0.0f;
+        sum_temperature = 0.0f;
+        sum_energy = 0.0f;
+        sum_randomness = 0.0f;
         for (int i = 0; i < pair_n; i++) {
             int cell_idx = batch_idx[i*2];
             Region* region = get_cell_region(cell_idx % SOUP_WIDTH, cell_idx / SOUP_WIDTH);
-            global_temperature *= region->temperature;
-            global_energy *= region->energy_level;
-            global_randomness += region->randomness_factor;
+            sum_temperature += region->temperature;
+            sum_energy += region->energy_level;
+            sum_randomness += region->randomness_factor;
         }
         if (pair_n > 0) {
-            global_temperature = custom_powf(global_temperature, 1.0f / pair_n);
-            global_energy = custom_powf(global_energy, 1.0f / pair_n);
-            global_randomness /= pair_n;
+            global_temperature = sum_temperature / (float)pair_n;
+            global_energy = sum_energy / (float)pair_n;
+            global_randomness = sum_randomness / (float)pair_n;
+        } else {
+            global_temperature = 1.0f;
+            global_energy = 1.0f;
+            global_randomness = 0.0f;
         }
     }
 
@@ -236,22 +223,13 @@ WASM_EXPORT("prepare_batch") int prepare_batch() {
 WASM_EXPORT("absorb_batch") int absorb_batch() {
     const uint8_t * src = batch;
     const int pair_n = batch_pair_n[0];
-    
-    float effect = use_global_effects ? global_temperature * global_energy : 1.0f;
 
+    // Restore original deterministic absorb semantics: always copy results back
     for (int i=0; i<pair_n*2; ++i) {
         const int tape_idx = batch_idx[i];
         uint8_t * dst = soup + tape_idx*TAPE_LENGTH;
-        
-        if (!use_global_effects) {
-            Region* region = get_cell_region(tape_idx % SOUP_WIDTH, tape_idx / SOUP_WIDTH);
-            effect = region->temperature * region->energy_level;
-        }
-        
-        for (int k=0; k<TAPE_LENGTH; ++k,++src,++dst) {
-            if (rand64() % 1000 < effect * 1000) {
-                *dst = *src;
-            }
+        for (int k=0; k<TAPE_LENGTH; ++k, ++src, ++dst) {
+            *dst = *src;
         }
         write_count[tape_idx] = batch_write_count[i];
     }
@@ -285,6 +263,17 @@ void set_exported_region(int x, int y, Region* region) {
     if (target_region != NULL) {
         *target_region = *region;
     }
+}
+
+// Bulk region-grid plane synchronization
+WASM_EXPORT("sync_regions_to_plane")
+void sync_regions_to_plane(void) {
+    serialize_regions_to_plane();
+}
+
+WASM_EXPORT("sync_plane_to_regions")
+void sync_plane_to_regions(void) {
+    deserialize_plane_to_regions();
 }
 
 WASM_EXPORT("set_region_obstacle")

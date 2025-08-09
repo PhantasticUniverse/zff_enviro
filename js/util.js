@@ -3,8 +3,7 @@ export function prepareWASM(instance) {
         uint8_t: Uint8Array,
         int: Int32Array,
         uint64_t: BigUint64Array,
-        float: Float32Array,
-        Region: Float32Array // Assuming Region is represented as a float array
+        float: Float32Array
     };
     const objects = {};
     const prefix = '_len_';

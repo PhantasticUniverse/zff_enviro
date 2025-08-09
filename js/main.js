@@ -29,6 +29,7 @@ let regionGridSize;
 // Add these constants near the top of the file, after the other constant declarations
 const MIN_REGION_GRID_SIZE = 4;
 const MAX_REGION_GRID_SIZE = 16;
+const REGION_PARAM_COUNT = 8; // [obstacle, dirN, dirE, dirS, dirW, randomness, temperature, energy]
 
 // Add this near the top of the file with other global variables
 let useGlobalEffects = true;
@@ -37,6 +38,95 @@ let useGlobalEffects = true;
 let globalTemperature = 1.0;
 let globalEnergy = 1.0;
 let globalRandomness = 0.0;
+
+// Bulk plane sync + brush/overlay state
+let showRegionOverlay = true;
+let regionOverlayTex = null;
+let overlayDirty = true;
+let isPainting = false;
+let brushMode = false; // default to toggle mode
+let obstacleMode = true; // default on per requirements
+const brush = { param: 'temperature', value: 1.0 };
+
+const clampRanges = {
+    temperature: [0, 2],
+    energy: [0, 2],
+    randomness: [0, 1],
+    direction: [-1, 1]
+};
+
+const debounce = (fn, ms) => {
+    let t;
+    return (...args) => { clearTimeout(t); t = setTimeout(() => fn(...args), ms); };
+};
+
+function planeIndex(x, y) {
+    return (y * regionGridSize + x) * REGION_PARAM_COUNT;
+}
+
+function clampValue(param, value) {
+    const [lo, hi] = param === 'temperature' ? clampRanges.temperature
+        : param === 'energy' ? clampRanges.energy
+        : param === 'randomness' ? clampRanges.randomness
+        : clampRanges.direction;
+    return Math.max(lo, Math.min(value, hi));
+}
+
+function setPlaneParam(x, y, param, value) {
+    if (x < 0 || y < 0 || x >= regionGridSize || y >= regionGridSize) return;
+    const base = planeIndex(x, y);
+    switch (param) {
+        case 'obstacle':
+            main.region_grid_plane[base + 0] = value ? 1.0 : 0.0;
+            break;
+        case 'dirN':
+            main.region_grid_plane[base + 1] = clampValue('direction', value);
+            break;
+        case 'dirE':
+            main.region_grid_plane[base + 2] = clampValue('direction', value);
+            break;
+        case 'dirS':
+            main.region_grid_plane[base + 3] = clampValue('direction', value);
+            break;
+        case 'dirW':
+            main.region_grid_plane[base + 4] = clampValue('direction', value);
+            break;
+        case 'randomness':
+            main.region_grid_plane[base + 5] = clampValue('randomness', value);
+            break;
+        case 'temperature':
+            main.region_grid_plane[base + 6] = clampValue('temperature', value);
+            break;
+        case 'energy':
+            main.region_grid_plane[base + 7] = clampValue('energy', value);
+            break;
+    }
+    overlayDirty = true;
+}
+
+function getPlaneParam(x, y, param) {
+    const base = planeIndex(x, y);
+    switch (param) {
+        case 'obstacle': return main.region_grid_plane[base + 0] > 0.5;
+        case 'dirN': return main.region_grid_plane[base + 1];
+        case 'dirE': return main.region_grid_plane[base + 2];
+        case 'dirS': return main.region_grid_plane[base + 3];
+        case 'dirW': return main.region_grid_plane[base + 4];
+        case 'randomness': return main.region_grid_plane[base + 5];
+        case 'temperature': return main.region_grid_plane[base + 6];
+        case 'energy': return main.region_grid_plane[base + 7];
+    }
+    return 0;
+}
+
+function syncRegionsToPlane() {
+    main.sync_regions_to_plane();
+    overlayDirty = true;
+}
+
+const commitPlaneToWASM = debounce(() => {
+    main.sync_plane_to_regions();
+}, 80);
 
 function requestReset() {
     needReset = true;
@@ -93,24 +183,21 @@ function scheduleBatch() {
         return;
     }
     if (needReset) {
-        const seed = parseInt(seedInput.value);
-        main.init(seed);
+        const seedRaw = seedInput.value;
+        const seed = Number(seedRaw);
+        const finalSeed = Number.isFinite(seed) ? seed : 6;
+        console.log('Initializing with seed:', finalSeed, '(raw:', seedRaw, ')');
+        main.init(finalSeed);
         batch_i = 0;
         needReset = false;
+        // Refresh plane and overlay after init so UI and shader match cleared environment
+        main.sync_regions_to_plane();
+        overlayDirty = true;
+        drawRegionGrid();
     }
     startTime = Date.now();
     batchOps = 0;
     const pair_n = main.prepare_batch();
-    
-    // Update global effects in the main WASM module
-    if (useGlobalEffects) {
-        globalTemperature = main.get_global_temperature();
-        globalEnergy = main.get_global_energy();
-        globalRandomness = main.get_global_randomness();
-        main.set_global_temperature(globalTemperature);
-        main.set_global_energy(globalEnergy);
-        main.set_global_randomness(globalRandomness);
-    }
 
     const job_n = pending = workers.length;
     const chunks = Array(job_n).fill(0).map((_,i)=>Math.floor(i*pair_n/job_n));
@@ -120,11 +207,7 @@ function scheduleBatch() {
         workers[i].postMessage({
             batch: main.batch.slice(start*tape_len*2, end*tape_len*2),
             ofs: start,
-            pair_n: end-start,
-            useGlobalEffects,
-            globalTemperature,
-            globalEnergy,
-            globalRandomness
+            pair_n: end-start
         });
     }
 }
@@ -234,7 +317,46 @@ function frame() {
         }
         FOut = sqrt(acc / float(Tile*Tile));
     `}, {size:[w, h], tag:'soup2dAvg'});    
-    glsl({tex:soup2dAvg, FP:`tex(vec2(UV.x,1.0-UV.y))`});
+    // Draw base to screen
+    const baseOut = glsl({tex:soup2dAvg, FP:`tex(vec2(UV.x,1.0-UV.y))`}, {size:[w, h], tag:'baseOut'});
+    glsl({base: baseOut, FP:`base(UV)`});
+
+    // Update region overlay texture if dirty
+    if (showRegionOverlay && overlayDirty) {
+        buildOrUpdateRegionOverlayTexture();
+        overlayDirty = false;
+    }
+
+    // Overlay visualization (obstacles/randomness/activity)
+    if (showRegionOverlay && regionOverlayTex) {
+        glsl({
+            overlay: regionOverlayTex,
+            gridSize: regionGridSize,
+            FP: `
+                // Compute region coords from screen UV
+                vec2 uv = vec2(UV.x, 1.0-UV.y);
+                ivec2 rc = ivec2(floor(uv * float(gridSize)));
+                int g = int(gridSize);
+                rc = clamp(rc, ivec2(0), ivec2(g-1));
+                vec4 p = overlay(rc);
+                float obstacle = p.r;       // 0..1
+                float T = p.g;              // 0..2
+                float E = p.b;              // 0..2
+                float R = p.a;              // 0..1
+                float act = clamp(T*E, 0.0, 2.0);
+                // White for >1 (hot/energetic), black for <1 (cold/low)
+                vec3 modColor = act > 1.0 ? vec3(1.0) : vec3(0.0);
+                float modAlpha = abs(act - 1.0) * 0.25;
+                vec3 rngColor = vec3(1.0, 0.2, 1.0);
+                float rngAlpha = R * 0.25;
+                float obsAlpha = obstacle * 0.35;
+                vec3 color = modColor * modAlpha + rngColor * rngAlpha;
+                float alpha = clamp(modAlpha + rngAlpha + obsAlpha, 0.0, 0.65);
+                FOut = vec4(color, alpha);
+            `,
+            Blend:'d*(1-sa)+s*sa'
+        });
+    }
     const trace = glsl({}, {data:z80.trace_vis, size:[tape_len*2, 128], tag:'trace'});
     glsl({trace, Blend:'d*(1-sa)+s*sa',
         VP:`XY*vec2(1./8.,-0.5)-vec2(0.8, 0.4),0,1`,
@@ -269,8 +391,12 @@ function set_color(i, r, g, b) {
 }
 
 async function run() {
-    const mainWasm = await WebAssembly.instantiateStreaming(fetch('wasm/main.wasm'));
-    const z80Wasm = await WebAssembly.instantiateStreaming(fetch('wasm/z80worker.wasm'));
+    const mainWasm = await WebAssembly.instantiateStreaming(
+        fetch('wasm/main.wasm?ts=' + Date.now(), { cache: 'no-store' })
+    );
+    const z80Wasm = await WebAssembly.instantiateStreaming(
+        fetch('wasm/z80worker.wasm?ts=' + Date.now(), { cache: 'no-store' })
+    );
     self.main = main = prepareWASM(mainWasm.instance);
     self.z80 = z80 = prepareWASM(z80Wasm.instance);
 
@@ -319,6 +445,9 @@ async function run() {
 
     // Initialize the region grid
     main.init_region_grid(regionGridSize);
+    // Sync initial regions into plane buffer for JS access
+    main.sync_regions_to_plane();
+    overlayDirty = true;
 
     createRegionGridUI();
     drawRegionGrid();
@@ -333,6 +462,34 @@ async function run() {
 
     // Call this function after the DOM is loaded
     setupRegionControls();
+
+    // Overlay toggle and brush UI wiring
+    const overlayToggle = document.getElementById('toggleRegionOverlay');
+    if (overlayToggle) {
+        overlayToggle.addEventListener('change', (e) => {
+            showRegionOverlay = e.target.checked;
+        });
+    }
+    const brushParamEl = document.getElementById('brushParam');
+    const brushValueEl = document.getElementById('brushValue');
+    const brushSizeEl = document.getElementById('brushSize');
+    if (brushParamEl && brushValueEl && brushSizeEl) {
+        const updateBrush = () => {
+            brush.param = brushParamEl.value;
+            let v = parseFloat(brushValueEl.value);
+            if (brush.param === 'temperature' || brush.param === 'energy') v = clampValue('temperature', v);
+            else if (brush.param === 'randomness') v = clampValue('randomness', v);
+            else if (brush.param.startsWith('dir')) v = clampValue('direction', v);
+            brush.value = v;
+            const s = Math.max(1, Math.min(regionGridSize, parseInt(brushSizeEl.value || '1', 10)));
+            brush.size = isNaN(s) ? 1 : s;
+        };
+        brushParamEl.addEventListener('change', updateBrush);
+        brushValueEl.addEventListener('change', updateBrush);
+        brushValueEl.addEventListener('input', updateBrush);
+        brushSizeEl.addEventListener('change', updateBrush);
+        updateBrush();
+    }
 }
 
 // Update this function to handle both toggling and selection
@@ -364,6 +521,9 @@ function createRegionGridUI() {
         const newSize = parseInt(e.target.value);
         main.init_region_grid(newSize);
         regionGridSize = newSize;
+        // Re-pull regions into plane after size change
+        syncRegionsToPlane();
+        overlayDirty = true;
         recreateRegionGridUI();
         drawRegionGrid();
         
@@ -378,41 +538,69 @@ function createRegionGridUI() {
 function recreateRegionGridUI() {
     const container = document.getElementById('regionGridContainer');
     container.innerHTML = '';
-
-    const cellWidth = 800 / SOUP_WIDTH;
-    const cellHeight = 800 / SOUP_HEIGHT;
+    const soupWidth = main.get_soup_width();
+    const soupHeight = main.get_soup_height();
+    const cellWidth = 800 / soupWidth;
+    const cellHeight = 800 / soupHeight;
 
     for (let y = 0; y < regionGridSize; y++) {
         for (let x = 0; x < regionGridSize; x++) {
             const cell = document.createElement('div');
             cell.id = `region_${x}_${y}`;
             cell.style.position = 'absolute';
-            cell.style.width = `${cellWidth * (SOUP_WIDTH / regionGridSize)}px`;
-            cell.style.height = `${cellHeight * (SOUP_HEIGHT / regionGridSize)}px`;
-            cell.style.left = `${x * cellWidth * (SOUP_WIDTH / regionGridSize)}px`;
-            cell.style.top = `${y * cellHeight * (SOUP_HEIGHT / regionGridSize)}px`;
+            cell.style.width = `${cellWidth * (soupWidth / regionGridSize)}px`;
+            cell.style.height = `${cellHeight * (soupHeight / regionGridSize)}px`;
+            cell.style.left = `${x * cellWidth * (soupWidth / regionGridSize)}px`;
+            cell.style.top = `${y * cellHeight * (soupHeight / regionGridSize)}px`;
             cell.style.border = '1px solid rgba(255, 255, 255, 0.3)';
             cell.style.boxSizing = 'border-box';
             cell.style.pointerEvents = 'auto';
+            // Default: toggle behavior; enable brush only when brushMode is on
             cell.onclick = (event) => {
-                if (event.shiftKey) {
+                if (brushMode) return; // brush handles interaction
+                if (obstacleMode) {
                     toggleRegionObstacle(x, y);
                 } else {
+                    // selection for parameter edits (optional)
                     toggleRegionSelection(x, y);
                 }
                 drawRegionGrid();
                 event.stopPropagation();
             };
+
+            // Brush painting (only active when brushMode)
+            cell.onmousedown = (event) => {
+                if (!brushMode) return;
+                isPainting = true;
+                applyBrushAt(x, y, event);
+                event.preventDefault();
+            };
+            cell.onmouseenter = (event) => {
+                if (!brushMode) return;
+                if (isPainting) {
+                    applyBrushAt(x, y, event);
+                }
+            };
             container.appendChild(cell);
         }
     }
 
-    // Add click event listener to deselect all cells when clicking outside
-    document.addEventListener('click', (event) => {
-        if (!event.target.closest('#regionGridContainer')) {
-            deselectAllRegions();
-        }
-    });
+    // Add click event listener to deselect all cells when clicking outside (singleton)
+    if (!window.__regionGridOutsideClickBound) {
+        window.__regionGridOutsideClickBound = true;
+        document.addEventListener('click', (event) => {
+            if (!event.target.closest('#regionGridContainer')) {
+                deselectAllRegions();
+            }
+        });
+        document.addEventListener('mouseup', () => {
+            if (isPainting) {
+                isPainting = false;
+                // Immediate commit on stroke end
+                main.sync_plane_to_regions();
+            }
+        });
+    }
 }
 
 // Add these constants at the top of the file
@@ -423,7 +611,8 @@ function drawRegionGrid() {
     for (let y = 0; y < regionGridSize; y++) {
         for (let x = 0; x < regionGridSize; x++) {
             const cell = document.getElementById(`region_${x}_${y}`);
-            const isObstacle = main.get_region_obstacle(x, y);
+            // Prefer plane for faster UI refresh
+            const isObstacle = getPlaneParam(x, y, 'obstacle');
             const isSelected = cell.classList.contains('selected');
             
             if (isObstacle) {
@@ -435,9 +624,9 @@ function drawRegionGrid() {
             }
 
             // Add visual indicators for region parameters
-            const temperature = main.get_region_temperature(x, y);
-            const energy = main.get_region_energy(x, y);
-            const randomness = main.get_region_randomness(x, y);
+            const temperature = getPlaneParam(x, y, 'temperature');
+            const energy = getPlaneParam(x, y, 'energy');
+            const randomness = getPlaneParam(x, y, 'randomness');
             
             cell.textContent = '';
             if (temperature !== 1) cell.textContent += 'T';
@@ -447,7 +636,11 @@ function drawRegionGrid() {
             // Add directional arrows for influence
             const directions = ['↑', '→', '↓', '←'];
             for (let i = 0; i < 4; i++) {
-                if (main.get_region_directional_influence(x, y, i) > 0) {
+                const val = i===0? getPlaneParam(x,y,'dirN')
+                           : i===1? getPlaneParam(x,y,'dirE')
+                           : i===2? getPlaneParam(x,y,'dirS')
+                                  : getPlaneParam(x,y,'dirW');
+                if (val > 0) {
                     cell.textContent += directions[i];
                 }
             }
@@ -456,8 +649,9 @@ function drawRegionGrid() {
 }
 
 function toggleRegionObstacle(x, y) {
-    const currentState = main.get_region_obstacle(x, y);
-    main.set_region_obstacle(x, y, !currentState);
+    const currentState = getPlaneParam(x, y, 'obstacle');
+    setPlaneParam(x, y, 'obstacle', !currentState);
+    commitPlaneToWASM();
     console.log(`Toggled obstacle for region (${x},${y}) to ${!currentState}`);
 }
 
@@ -478,9 +672,9 @@ function updateControlValues() {
     const selectedRegions = getSelectedRegions();
     if (selectedRegions.length > 0) {
         const [x, y] = selectedRegions[0];
-        document.getElementById('temperatureSlider').value = main.get_region_temperature(x, y);
-        document.getElementById('energySlider').value = main.get_region_energy(x, y);
-        document.getElementById('randomnessSlider').value = main.get_region_randomness(x, y);
+        document.getElementById('temperatureSlider').value = getPlaneParam(x, y, 'temperature');
+        document.getElementById('energySlider').value = getPlaneParam(x, y, 'energy');
+        document.getElementById('randomnessSlider').value = getPlaneParam(x, y, 'randomness');
         updateSliderLabels();
     }
 }
@@ -508,6 +702,15 @@ function setupRegionControls() {
         });
     });
 
+    // Brush mode toggle
+    const brushModeEl = document.getElementById('brushMode');
+    if (brushModeEl) {
+        brushModeEl.checked = false; // default off (toggle mode)
+        brushModeEl.addEventListener('change', () => {
+            brushMode = brushModeEl.checked;
+        });
+    }
+
     const directions = ['north', 'east', 'south', 'west'];
     directions.forEach((dir, index) => {
         document.getElementById(`${dir}Btn`).addEventListener('click', () => {
@@ -515,8 +718,14 @@ function setupRegionControls() {
         });
     });
 
-    // Add event listener for the obstacle button
-    document.getElementById('obstacleBtn').addEventListener('click', toggleObstacle);
+    // Obstacle mode toggle (on/off behavior overriding click action)
+    const obstacleModeEl = document.getElementById('obstacleMode');
+    if (obstacleModeEl) {
+        obstacleModeEl.checked = true;
+        obstacleModeEl.addEventListener('change', () => {
+            obstacleMode = obstacleModeEl.checked;
+        });
+    }
 
     // Add event listener for the global effects toggle button
     document.getElementById('toggleGlobalEffects').addEventListener('click', () => {
@@ -540,38 +749,70 @@ function updateSliderLabels() {
 function updateSelectedRegions(param, value) {
     const selectedRegions = getSelectedRegions();
     selectedRegions.forEach(([x, y]) => {
-        switch (param) {
-            case 'temperature':
-                main.set_region_temperature(x, y, value);
-                break;
-            case 'energy':
-                main.set_region_energy(x, y, value);
-                break;
-            case 'randomness':
-                main.set_region_randomness(x, y, value);
-                break;
-        }
+        setPlaneParam(x, y, param, value);
     });
+    commitPlaneToWASM();
     drawRegionGrid();
 }
 
 function toggleDirectionalInfluence(direction) {
     const selectedRegions = getSelectedRegions();
     selectedRegions.forEach(([x, y]) => {
-        const currentValue = main.get_region_directional_influence(x, y, direction);
+        const key = direction===0?'dirN':direction===1?'dirE':direction===2?'dirS':'dirW';
+        const currentValue = getPlaneParam(x, y, key);
         const newValue = currentValue > 0 ? 0 : 1;
-        main.set_region_directional_influence(x, y, direction, newValue);
+        setPlaneParam(x, y, key, newValue);
     });
+    commitPlaneToWASM();
     drawRegionGrid();
 }
 
 function toggleObstacle() {
     const selectedRegions = getSelectedRegions();
     selectedRegions.forEach(([x, y]) => {
-        const currentState = main.get_region_obstacle(x, y);
-        main.set_region_obstacle(x, y, !currentState);
+        const currentState = getPlaneParam(x, y, 'obstacle');
+        setPlaneParam(x, y, 'obstacle', !currentState);
     });
+    commitPlaneToWASM();
     drawRegionGrid();
+}
+
+// Brush painting application (square brush of size N, where 1 = 1x1 region)
+function applyBrushAt(cx, cy, evt) {
+    const half = Math.floor((Math.max(1, brush.size) - 1) / 2);
+    for (let dy = -half; dy <= half; dy++) {
+        for (let dx = -half; dx <= half; dx++) {
+            const x = cx + dx;
+            const y = cy + dy;
+            const param = brush.param;
+            if (param === 'obstacle') {
+                setPlaneParam(x, y, 'obstacle', brush.value >= 0.5);
+            } else if (param === 'temperature' || param === 'energy' || param === 'randomness') {
+                setPlaneParam(x, y, param, brush.value);
+            } else if (param === 'dirN' || param === 'dirE' || param === 'dirS' || param === 'dirW') {
+                setPlaneParam(x, y, param, brush.value);
+            }
+        }
+    }
+    commitPlaneToWASM();
+    drawRegionGrid();
+}
+
+// Build/update a compact overlay texture from the plane buffer
+function buildOrUpdateRegionOverlayTexture() {
+    // RGBA32F: R=obstacle, G=temperature, B=energy, A=randomness
+    const data = new Float32Array(regionGridSize * regionGridSize * 4);
+    let p = 0;
+    for (let y = 0; y < regionGridSize; y++) {
+        for (let x = 0; x < regionGridSize; x++) {
+            const base = planeIndex(x, y);
+            data[p++] = main.region_grid_plane[base + 0]; // obstacle
+            data[p++] = main.region_grid_plane[base + 6]; // temperature
+            data[p++] = main.region_grid_plane[base + 7]; // energy
+            data[p++] = main.region_grid_plane[base + 5]; // randomness
+        }
+    }
+    regionOverlayTex = glsl({}, {data, size:[regionGridSize, regionGridSize], format:'rgba32f', tag:'regionOverlay'});
 }
 
 run();
