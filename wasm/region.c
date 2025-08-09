@@ -1,4 +1,8 @@
 #include "region.h"
+// Local helpers to avoid lib deps
+static inline float clampf(float v, float lo, float hi) {
+    return v < lo ? lo : (v > hi ? hi : v);
+}
 
 void init_region(Region* region) {
     region->is_obstacle = false;
@@ -16,20 +20,24 @@ void set_region_obstacle(Region* region, bool is_obstacle) {
 
 void set_region_directional_influence(Region* region, Direction dir, float value) {
     if (dir >= 0 && dir < NUM_DIRECTIONS) {
-        region->directional_influence[dir] = value;
+        // Clamp to [-1, 1]
+        region->directional_influence[dir] = clampf(value, -1.0f, 1.0f);
     }
 }
 
 void set_region_randomness(Region* region, float value) {
-    region->randomness_factor = value;
+    // Clamp to [0, 1]
+    region->randomness_factor = clampf(value, 0.0f, 1.0f);
 }
 
 void set_region_temperature(Region* region, float value) {
-    region->temperature = value;
+    // Clamp to [0, 2]
+    region->temperature = clampf(value, 0.0f, 2.0f);
 }
 
 void set_region_energy(Region* region, float value) {
-    region->energy_level = value;
+    // Clamp to [0, 2]
+    region->energy_level = clampf(value, 0.0f, 2.0f);
 }
 
 // Implement getter functions if needed

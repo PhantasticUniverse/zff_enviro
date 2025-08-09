@@ -175,6 +175,35 @@ Semantics (high level):
 - Balance the region grid size with the desired level of detail and performance requirements.
 - Consider using WebGPU in the future for even greater performance on supported platforms.
 - Prefer bulk plane edits over many per-region calls. The UI debounces `sync_plane_to_regions()` and also commits on mouseup to reduce overhead.
+- Overlay can be filtered by parameter (All, Obstacles, Temperature, Energy, Randomness) and has an opacity control for clarity.
+
+## Region Grid v1.1 Behavior and Ranges
+
+Parameters per region (plane layout `[obstacle, dirN, dirE, dirS, dirW, randomness, temperature, energy]`):
+
+- Obstacle: 0 or 1. Cells in obstacle regions are never selected as pairs and never mutated.
+- Directional influence: floats in [-1, 1] per cardinal direction. Biases axis choice and direction; 0 means neutral.
+- Randomness: float in [0, 1]. During prepare, with linear probability, flips a random bit in one byte of the tape (per cell) when > 0.
+- Temperature: float in [0, 2].
+- Energy: float in [0, 2].
+
+Effects:
+- Directional influence: For horizontal/vertical axes, bias direction based on (E−W) or (S−N). Clamped in C for safety.
+- Randomness: Bit flip frequency scales linearly with the value in [0..1]; no effect when 0.
+- Temperature × Energy: Scales absorb probability: neutral at 1×1; below 1 reduces absorb probability; above 1 currently treated as always-absorb to preserve throughput (hook retained).
+
+UI defaults:
+- Obstacle toggle mode: ON by default; Brush mode: OFF by default.
+- Overlay parameter selector and opacity slider control visualization.
+- Selection highlight is disabled while obstacle mode is on (clicks toggle obstacles instead of selecting).
+- Brush shows crosshair cursor and supports size/value and parameter selection.
+
+Persistence:
+- Export/Import region plane as JSON with size and layout.
+- Presets: uniform, stripes, checkerboard, gradient.
+
+Tips:
+- Keep region grid at 8×8 for <5% overhead on mid-range hardware; 16×16 is heavier. Use debounced sync while brushing.
 
 ## Contributing
 

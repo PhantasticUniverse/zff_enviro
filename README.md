@@ -12,3 +12,5 @@ Run a local web server (e.g. `python3 -m http.server 8000`) and navigate the bro
 ## Dependencies
 * a modified version of z80 emulator is located in the `external` folder
 * [zig](https://ziglang.org/) compiler is used to build the WASM code (`./build.sh`)
+
+See `CHANGELOG.md` for prototype updates and the current Environmental Region Grid changes.

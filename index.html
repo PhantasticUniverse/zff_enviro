@@ -161,10 +161,28 @@ input, select, button {
                         <input type="checkbox" id="toggleRegionOverlay" checked>
                         Region overlay
                     </label>
+                    <label style="margin-left:10px;">
+                        Overlay:
+                        <select id="overlayParam">
+                            <option value="all">All</option>
+                            <option value="obstacles">Obstacles</option>
+                            <option value="temperature">Temperature</option>
+                            <option value="energy">Energy</option>
+                            <option value="randomness">Randomness</option>
+                        </select>
+                    </label>
+                    <label style="margin-left:10px;">
+                        Opacity:
+                        <input type="range" id="overlayOpacity" min="0" max="1" step="0.05" value="0.55">
+                    </label>
                 </div>
             </div>
             <div class="right-controls" id="regionControls">
                 <h3>Region Controls</h3>
+                <div id="modeBadges" style="margin-bottom:8px;">
+                    <span id="badgeObstacle" style="display:inline-block;padding:2px 6px;background:#333;border:1px solid #777;border-radius:4px;margin-right:6px;">Obstacle: ON</span>
+                    <span id="badgeBrush" style="display:inline-block;padding:2px 6px;background:#333;border:1px solid #777;border-radius:4px;">Brush: OFF</span>
+                </div>
                 <div>
                     <label>
                         <input type="checkbox" id="brushMode">
@@ -215,6 +233,24 @@ input, select, button {
                         <input type="checkbox" id="obstacleMode" checked>
                         Obstacle toggle (click to toggle tiles)
                     </label>
+                </div>
+                <div style="margin-top:8px;">
+                    <button id="resetRegions">Reset regions</button>
+                    <button id="exportRegions">Export JSON</button>
+                    <label style="margin-left:6px;">
+                        <input type="file" id="importRegionsFile" accept="application/json" style="display:none;">
+                        <button id="importRegions">Import JSON</button>
+                    </label>
+                </div>
+                <div style="margin-top:8px;">
+                    <label for="presetSelect">Presets:</label>
+                    <select id="presetSelect">
+                        <option value="uniform">Uniform</option>
+                        <option value="stripes">Stripes</option>
+                        <option value="checkerboard">Checkerboard</option>
+                        <option value="gradient">Gradient</option>
+                    </select>
+                    <button id="applyPreset">Apply</button>
                 </div>
             </div>
         </div>

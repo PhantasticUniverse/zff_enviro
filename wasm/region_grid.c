@@ -4,6 +4,7 @@
 // Use limits from region.h via region_grid.h inclusion
 static Region grid[MAX_REGION_GRID_SIZE][MAX_REGION_GRID_SIZE];
 static int grid_size = MIN_REGION_GRID_SIZE;
+static inline float clampf(float v, float lo, float hi) { return v < lo ? lo : (v > hi ? hi : v); }
 
 void init_region_grid(int size) {
     if (size < MIN_REGION_GRID_SIZE || size > MAX_REGION_GRID_SIZE) {
@@ -59,13 +60,13 @@ void deserialize_plane_to_regions(void) {
             const int idx = (y * grid_size + x) * stride;
             Region *r = &grid[y][x];
             r->is_obstacle = region_grid_plane[idx + 0] > 0.5f;
-            r->directional_influence[NORTH] = region_grid_plane[idx + 1];
-            r->directional_influence[EAST] = region_grid_plane[idx + 2];
-            r->directional_influence[SOUTH] = region_grid_plane[idx + 3];
-            r->directional_influence[WEST] = region_grid_plane[idx + 4];
-            r->randomness_factor = region_grid_plane[idx + 5];
-            r->temperature = region_grid_plane[idx + 6];
-            r->energy_level = region_grid_plane[idx + 7];
+            r->directional_influence[NORTH] = clampf(region_grid_plane[idx + 1], -1.0f, 1.0f);
+            r->directional_influence[EAST]  = clampf(region_grid_plane[idx + 2], -1.0f, 1.0f);
+            r->directional_influence[SOUTH] = clampf(region_grid_plane[idx + 3], -1.0f, 1.0f);
+            r->directional_influence[WEST]  = clampf(region_grid_plane[idx + 4], -1.0f, 1.0f);
+            r->randomness_factor = clampf(region_grid_plane[idx + 5], 0.0f, 1.0f);
+            r->temperature = clampf(region_grid_plane[idx + 6], 0.0f, 2.0f);
+            r->energy_level = clampf(region_grid_plane[idx + 7], 0.0f, 2.0f);
         }
     }
 }

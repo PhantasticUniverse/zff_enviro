@@ -41,6 +41,8 @@ let globalRandomness = 0.0;
 
 // Bulk plane sync + brush/overlay state
 let showRegionOverlay = true;
+let overlayParamMode = 'all'; // 'all' | 'obstacles' | 'temperature' | 'energy' | 'randomness'
+let overlayOpacity = 0.55;
 let regionOverlayTex = null;
 let overlayDirty = true;
 let isPainting = false;
@@ -327,11 +329,13 @@ function frame() {
         overlayDirty = false;
     }
 
-    // Overlay visualization (obstacles/randomness/activity)
+    // Overlay visualization (per-parameter with selector + opacity)
     if (showRegionOverlay && regionOverlayTex) {
         glsl({
             overlay: regionOverlayTex,
             gridSize: regionGridSize,
+            mode: overlayParamMode === 'all' ? 0 : overlayParamMode === 'obstacles' ? 1 : overlayParamMode === 'temperature' ? 2 : overlayParamMode === 'energy' ? 3 : 4,
+            userAlpha: overlayOpacity,
             FP: `
                 // Compute region coords from screen UV
                 vec2 uv = vec2(UV.x, 1.0-UV.y);
@@ -344,14 +348,33 @@ function frame() {
                 float E = p.b;              // 0..2
                 float R = p.a;              // 0..1
                 float act = clamp(T*E, 0.0, 2.0);
-                // White for >1 (hot/energetic), black for <1 (cold/low)
                 vec3 modColor = act > 1.0 ? vec3(1.0) : vec3(0.0);
-                float modAlpha = abs(act - 1.0) * 0.25;
+                float modAlpha = abs(act - 1.0) * 0.45;
                 vec3 rngColor = vec3(1.0, 0.2, 1.0);
-                float rngAlpha = R * 0.25;
-                float obsAlpha = obstacle * 0.35;
-                vec3 color = modColor * modAlpha + rngColor * rngAlpha;
-                float alpha = clamp(modAlpha + rngAlpha + obsAlpha, 0.0, 0.65);
+                float rngAlpha = R * 0.55;
+                float obsAlpha = obstacle * 0.65;
+
+                // Mode selection
+                int m = int(mode);
+                vec3 color = vec3(0.0);
+                float alpha = 0.0;
+                if (m == 0) { // all
+                    color = modColor * modAlpha + rngColor * rngAlpha;
+                    alpha = clamp(modAlpha + rngAlpha + obsAlpha, 0.0, 1.0);
+                } else if (m == 1) { // obstacles
+                    color = vec3(0.0);
+                    alpha = obsAlpha;
+                } else if (m == 2) { // temperature
+                    color = (T > 1.0) ? vec3(1.0) : vec3(0.0);
+                    alpha = abs(T - 1.0);
+                } else if (m == 3) { // energy
+                    color = (E > 1.0) ? vec3(1.0) : vec3(0.0);
+                    alpha = abs(E - 1.0);
+                } else { // randomness
+                    color = rngColor;
+                    alpha = rngAlpha;
+                }
+                alpha = clamp(alpha * userAlpha, 0.0, 1.0);
                 FOut = vec4(color, alpha);
             `,
             Blend:'d*(1-sa)+s*sa'
@@ -473,6 +496,8 @@ async function run() {
     const brushParamEl = document.getElementById('brushParam');
     const brushValueEl = document.getElementById('brushValue');
     const brushSizeEl = document.getElementById('brushSize');
+    const overlayParamEl = document.getElementById('overlayParam');
+    const overlayOpacityEl = document.getElementById('overlayOpacity');
     if (brushParamEl && brushValueEl && brushSizeEl) {
         const updateBrush = () => {
             brush.param = brushParamEl.value;
@@ -489,6 +514,20 @@ async function run() {
         brushValueEl.addEventListener('input', updateBrush);
         brushSizeEl.addEventListener('change', updateBrush);
         updateBrush();
+    }
+    if (overlayParamEl) {
+        overlayParamMode = overlayParamEl.value;
+        overlayParamEl.addEventListener('change', () => {
+            overlayParamMode = overlayParamEl.value;
+            overlayDirty = true;
+        });
+    }
+    if (overlayOpacityEl) {
+        overlayOpacity = parseFloat(overlayOpacityEl.value);
+        overlayOpacityEl.addEventListener('input', () => {
+            overlayOpacity = Math.max(0, Math.min(1, parseFloat(overlayOpacityEl.value)));
+            overlayDirty = true;
+        });
     }
 }
 
@@ -580,6 +619,10 @@ function recreateRegionGridUI() {
                 if (isPainting) {
                     applyBrushAt(x, y, event);
                 }
+            };
+            // Cursor hint when brushMode
+            cell.onmousemove = () => {
+                cell.style.cursor = brushMode ? 'crosshair' : 'pointer';
             };
             container.appendChild(cell);
         }
@@ -708,6 +751,8 @@ function setupRegionControls() {
         brushModeEl.checked = false; // default off (toggle mode)
         brushModeEl.addEventListener('change', () => {
             brushMode = brushModeEl.checked;
+            const badge = document.getElementById('badgeBrush');
+            if (badge) badge.textContent = `Brush: ${brushMode ? 'ON' : 'OFF'}`;
         });
     }
 
@@ -724,6 +769,12 @@ function setupRegionControls() {
         obstacleModeEl.checked = true;
         obstacleModeEl.addEventListener('change', () => {
             obstacleMode = obstacleModeEl.checked;
+            const badge = document.getElementById('badgeObstacle');
+            if (badge) badge.textContent = `Obstacle: ${obstacleMode ? 'ON' : 'OFF'}`;
+            if (obstacleMode) {
+                deselectAllRegions();
+            }
+            drawRegionGrid();
         });
     }
 
@@ -736,6 +787,140 @@ function setupRegionControls() {
     });
 
     updateSliderLabels();
+
+    // Reset regions
+    const resetBtn = document.getElementById('resetRegions');
+    if (resetBtn) {
+        resetBtn.addEventListener('click', () => {
+            for (let y = 0; y < regionGridSize; y++) {
+                for (let x = 0; x < regionGridSize; x++) {
+                    setPlaneParam(x, y, 'obstacle', false);
+                    setPlaneParam(x, y, 'dirN', 0);
+                    setPlaneParam(x, y, 'dirE', 0);
+                    setPlaneParam(x, y, 'dirS', 0);
+                    setPlaneParam(x, y, 'dirW', 0);
+                    setPlaneParam(x, y, 'randomness', 0);
+                    setPlaneParam(x, y, 'temperature', 1);
+                    setPlaneParam(x, y, 'energy', 1);
+                }
+            }
+            main.sync_plane_to_regions();
+            overlayDirty = true;
+            drawRegionGrid();
+        });
+    }
+
+    // Export
+    const exportBtn = document.getElementById('exportRegions');
+    if (exportBtn) {
+        exportBtn.addEventListener('click', () => {
+            const plane = [];
+            for (let y = 0; y < regionGridSize; y++) {
+                for (let x = 0; x < regionGridSize; x++) {
+                    const base = planeIndex(x, y);
+                    const row = [];
+                    for (let k = 0; k < REGION_PARAM_COUNT; k++) row.push(main.region_grid_plane[base + k]);
+                    plane.push(row);
+                }
+            }
+            const payload = { size: regionGridSize, layout: ['obstacle','dirN','dirE','dirS','dirW','randomness','temperature','energy'], plane };
+            const blob = new Blob([JSON.stringify(payload)], { type: 'application/json' });
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = `regions_${regionGridSize}.json`;
+            a.click();
+            URL.revokeObjectURL(url);
+        });
+    }
+
+    // Import
+    const importBtn = document.getElementById('importRegions');
+    const importFile = document.getElementById('importRegionsFile');
+    if (importBtn && importFile) {
+        importBtn.addEventListener('click', () => importFile.click());
+        importFile.addEventListener('change', async () => {
+            const file = importFile.files && importFile.files[0];
+            if (!file) return;
+            const text = await file.text();
+            try {
+                const obj = JSON.parse(text);
+                if (!obj || typeof obj.size !== 'number' || !Array.isArray(obj.plane)) return;
+                // Resize if needed
+                if (obj.size !== regionGridSize) {
+                    main.init_region_grid(obj.size);
+                    regionGridSize = obj.size;
+                    recreateRegionGridUI();
+                }
+                // Apply
+                const stride = REGION_PARAM_COUNT;
+                for (let y = 0; y < regionGridSize; y++) {
+                    for (let x = 0; x < regionGridSize; x++) {
+                        const row = obj.plane[y * regionGridSize + x];
+                        const base = planeIndex(x, y);
+                        for (let k = 0; k < stride; k++) {
+                            let v = row[k];
+                            if (k === 0) v = v ? 1 : 0;
+                            if (k >= 1 && k <= 4) v = clampValue('direction', v);
+                            if (k === 5) v = clampValue('randomness', v);
+                            if (k === 6) v = clampValue('temperature', v);
+                            if (k === 7) v = clampValue('energy', v);
+                            main.region_grid_plane[base + k] = v;
+                        }
+                    }
+                }
+                main.sync_plane_to_regions();
+                overlayDirty = true;
+                drawRegionGrid();
+            } catch (e) {
+                console.error('Invalid JSON', e);
+            }
+        });
+    }
+
+    // Presets
+    const presetSelect = document.getElementById('presetSelect');
+    const applyPresetBtn = document.getElementById('applyPreset');
+    if (presetSelect && applyPresetBtn) {
+        applyPresetBtn.addEventListener('click', () => {
+            const preset = presetSelect.value;
+            for (let y = 0; y < regionGridSize; y++) {
+                for (let x = 0; x < regionGridSize; x++) {
+                    if (preset === 'uniform') {
+                        setPlaneParam(x, y, 'obstacle', false);
+                        setPlaneParam(x, y, 'dirN', 0);
+                        setPlaneParam(x, y, 'dirE', 0);
+                        setPlaneParam(x, y, 'dirS', 0);
+                        setPlaneParam(x, y, 'dirW', 0);
+                        setPlaneParam(x, y, 'randomness', 0);
+                        setPlaneParam(x, y, 'temperature', 1);
+                        setPlaneParam(x, y, 'energy', 1);
+                    } else if (preset === 'stripes') {
+                        const on = (y % 2) === 0;
+                        setPlaneParam(x, y, 'obstacle', false);
+                        setPlaneParam(x, y, 'randomness', on ? 0.5 : 0.0);
+                        setPlaneParam(x, y, 'temperature', on ? 1.2 : 0.8);
+                        setPlaneParam(x, y, 'energy', 1.0);
+                    } else if (preset === 'checkerboard') {
+                        const on = ((x + y) % 2) === 0;
+                        setPlaneParam(x, y, 'obstacle', false);
+                        setPlaneParam(x, y, 'temperature', on ? 1.4 : 0.7);
+                        setPlaneParam(x, y, 'energy', on ? 0.9 : 1.1);
+                        setPlaneParam(x, y, 'randomness', on ? 0.2 : 0.0);
+                    } else if (preset === 'gradient') {
+                        const t = x / Math.max(1, regionGridSize - 1);
+                        setPlaneParam(x, y, 'obstacle', false);
+                        setPlaneParam(x, y, 'temperature', 0.8 + 0.4 * t);
+                        setPlaneParam(x, y, 'energy', 1.2 - 0.4 * t);
+                        setPlaneParam(x, y, 'randomness', 0.3 * t);
+                    }
+                }
+            }
+            main.sync_plane_to_regions();
+            overlayDirty = true;
+            drawRegionGrid();
+        });
+    }
 }
 
 function updateSliderLabels() {

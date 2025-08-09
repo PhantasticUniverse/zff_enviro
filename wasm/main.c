@@ -183,15 +183,37 @@ WASM_EXPORT("prepare_batch") int prepare_batch() {
         mask[i] = mask[j] = 1;
         batch_idx[2*pair_n] = i;
         batch_idx[2*pair_n+1] = j;
+        // Copy tapes for i and j
         for (int k=0; k<TAPE_LENGTH; ++k) {
             batch[pos+k] = soup[i*TAPE_LENGTH+k];
             batch[pos+k+TAPE_LENGTH] = soup[j*TAPE_LENGTH+k];
         }
+
+        // Randomness perturbation: occasional byte/bit flip, scaled linearly by randomness_factor (0..1)
+        // Apply independently to each tape if respective region randomness > 0
+        if (region && region->randomness_factor > 0.0f) {
+            uint64_t r = rand64();
+            // Probability check with 1000 resolution
+            if ((r % 1000ULL) < (uint64_t)(region->randomness_factor * 1000.0f)) {
+                r >>= 10;
+                int byte_idx = (int)(r % TAPE_LENGTH); r >>= 6;
+                uint8_t bit_mask = 1u << (r & 7u);
+                batch[pos + byte_idx] ^= bit_mask;
+            }
+        }
+        if (region_j_ptr && region_j_ptr->randomness_factor > 0.0f) {
+            uint64_t r2 = rand64();
+            if ((r2 % 1000ULL) < (uint64_t)(region_j_ptr->randomness_factor * 1000.0f)) {
+                r2 >>= 10;
+                int byte_idx2 = (int)(r2 % TAPE_LENGTH); r2 >>= 6;
+                uint8_t bit_mask2 = 1u << (r2 & 7u);
+                batch[pos + TAPE_LENGTH + byte_idx2] ^= bit_mask2;
+            }
+        }
         pos += TAPE_LENGTH*2;
         pair_n++;
         collision_count = 0;
-
-        // No random perturbation in default/original behavior
+        
     }
 
     if (use_global_effects) {
@@ -224,14 +246,60 @@ WASM_EXPORT("absorb_batch") int absorb_batch() {
     const uint8_t * src = batch;
     const int pair_n = batch_pair_n[0];
 
-    // Restore original deterministic absorb semantics: always copy results back
-    for (int i=0; i<pair_n*2; ++i) {
-        const int tape_idx = batch_idx[i];
-        uint8_t * dst = soup + tape_idx*TAPE_LENGTH;
-        for (int k=0; k<TAPE_LENGTH; ++k, ++src, ++dst) {
-            *dst = *src;
+    // Absorb semantics with Temperature×Energy scaling: neutral at 1×1
+    for (int i=0; i<pair_n; ++i) {
+        // Two tapes per pair
+        const int tape_idx_a = batch_idx[2*i];
+        const int tape_idx_b = batch_idx[2*i+1];
+        uint8_t * dst_a = soup + tape_idx_a*TAPE_LENGTH;
+        uint8_t * dst_b = soup + tape_idx_b*TAPE_LENGTH;
+        Region* region_a = get_cell_region(tape_idx_a % SOUP_WIDTH, tape_idx_a / SOUP_WIDTH);
+        Region* region_b = get_cell_region(tape_idx_b % SOUP_WIDTH, tape_idx_b / SOUP_WIDTH);
+        float scale_a = (region_a ? (region_a->temperature * region_a->energy_level) : 1.0f);
+        float scale_b = (region_b ? (region_b->temperature * region_b->energy_level) : 1.0f);
+
+        // Decide absorb based on scale vs 1; when both are exactly 1, always absorb.
+        bool absorb_a = true;
+        bool absorb_b = true;
+        if (scale_a != 1.0f) {
+            // For scale<1, reduce probability; for scale>1, allow skipping with lower chance
+            float p = scale_a;
+            if (p < 0.0f) p = 0.0f; if (p > 2.0f) p = 2.0f;
+            if (p > 1.0f) {
+                // Map (1..2] to (1..1], still almost always absorb; keep deterministic bias small
+                p = 1.0f; // always absorb when >1 to avoid diverging semantics, but keep hook
+            }
+            // For [0..1], absorb with probability p
+            if (p < 1.0f) {
+                uint64_t r = rand64();
+                absorb_a = ((r % 1000ULL) < (uint64_t)(p * 1000.0f));
+            }
         }
-        write_count[tape_idx] = batch_write_count[i];
+        if (scale_b != 1.0f) {
+            float p = scale_b;
+            if (p < 0.0f) p = 0.0f; if (p > 2.0f) p = 2.0f;
+            if (p > 1.0f) {
+                p = 1.0f;
+            }
+            if (p < 1.0f) {
+                uint64_t r = rand64();
+                absorb_b = ((r % 1000ULL) < (uint64_t)(p * 1000.0f));
+            }
+        }
+
+        // Copy or skip per decision
+        if (absorb_a) {
+            for (int k=0; k<TAPE_LENGTH; ++k, ++src, ++dst_a) { *dst_a = *src; }
+            write_count[tape_idx_a] = batch_write_count[2*i];
+        } else {
+            src += TAPE_LENGTH; // skip
+        }
+        if (absorb_b) {
+            for (int k=0; k<TAPE_LENGTH; ++k, ++src, ++dst_b) { *dst_b = *src; }
+            write_count[tape_idx_b] = batch_write_count[2*i+1];
+        } else {
+            src += TAPE_LENGTH; // skip
+        }
     }
     return pair_n;
 }
