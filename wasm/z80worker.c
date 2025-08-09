@@ -1,10 +1,12 @@
 #include "../external/z80.h"
+#include "stdio.h" // our local shim to satisfy includes
 
 #include "common.h"
 
 #ifdef WASM
-FILE * const stderr=NULL;
-int fprintf(FILE *stream, const char *format, ...) {return 0;}
+// Provide minimal stubs to avoid pulling stdio in freestanding build
+FILE * stderr = NULL;
+int fprintf(FILE *stream, const char *format, ...) { (void)stream; (void)format; return 0; }
 #endif
 
 enum { PAIR_LENGTH = TAPE_LENGTH * 2 };
